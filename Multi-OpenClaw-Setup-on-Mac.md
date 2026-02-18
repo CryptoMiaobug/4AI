@@ -156,47 +156,101 @@ channels:
 
 Create a `.command` file for each instance:
 
+Each script uses **smart gateway detection**: if the gateway is already running, it skips startup and connects the TUI directly. This means you can double-click the `.command` file to either launch a fresh instance OR reconnect to an existing one — no more "port already in use" errors.
+
 **`OpenClaw_Claude.command`**:
 ```bash
-#!/bin/bash
+#!/bin/zsh
+source ~/.zshrc 2>/dev/null
 cd ~
+echo "🦞 Starting OpenClaw Claude (Instance C)..."
+echo "Gateway on port 18789"
 
-# Set API key via environment variable
 export ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY"
 
-# Optional: proxy configuration
-# export HTTP_PROXY="http://your-proxy:port"
-# export HTTPS_PROXY="http://your-proxy:port"
-# export NO_PROXY="localhost,127.0.0.1"
+# Smart gateway detection: skip startup if already running
+if ! lsof -i :18789 -sTCP:LISTEN >/dev/null 2>&1; then
+    echo "Starting gateway..."
+    openclaw gateway run &
+    sleep 4
+else
+    echo "✅ Gateway already running, connecting TUI..."
+fi
 
-# Launch with specific home directory
-OPENCLAW_HOME=~/.openclaw openclaw gateway
+openclaw tui
 ```
 
 **`OpenClaw_DeepSeek.command`**:
 ```bash
-#!/bin/bash
+#!/bin/zsh
+source ~/.zshrc 2>/dev/null
 cd ~
+echo "🤖 Starting OpenClaw Deepseek (Instance D)..."
+echo "Gateway on port 18790"
 
 export DEEPSEEK_API_KEY="$DEEPSEEK_API_KEY"
+export OPENCLAW_STATE_DIR="$HOME/.openclaw-deepseek"
+export OPENCLAW_CONFIG_PATH="$HOME/.openclaw-deepseek/openclaw.json"
+export OPENCLAW_GATEWAY_PORT=18790
 
-OPENCLAW_HOME=~/.openclaw-deepseek openclaw gateway
+# Smart gateway detection
+if lsof -i :${OPENCLAW_GATEWAY_PORT} -sTCP:LISTEN -P >/dev/null 2>&1; then
+  echo "✅ Gateway already running on port ${OPENCLAW_GATEWAY_PORT}, connecting TUI..."
+  GATEWAY_PID=""
+else
+  openclaw gateway run &
+  GATEWAY_PID=$!
+  sleep 4
+fi
+
+openclaw tui
+
+# Only kill gateway if we started it
+if [[ -n "$GATEWAY_PID" ]]; then
+  kill $GATEWAY_PID 2>/dev/null
+fi
 ```
 
 **`OpenClaw_Gemini.command`**:
 ```bash
-#!/bin/bash
+#!/bin/zsh
+source ~/.zshrc 2>/dev/null
 cd ~
+echo "🧠 Starting OpenClaw GLM (Instance G)..."
+echo "Gateway on port 18791"
 
 export GOOGLE_API_KEY="$GOOGLE_API_KEY"
+export OPENCLAW_STATE_DIR="$HOME/.openclaw-gemini"
+export OPENCLAW_CONFIG_PATH="$HOME/.openclaw-gemini/openclaw.json"
+export OPENCLAW_GATEWAY_PORT=18791
 
-OPENCLAW_HOME=~/.openclaw-gemini openclaw gateway
+# Smart gateway detection
+if lsof -i :${OPENCLAW_GATEWAY_PORT} -sTCP:LISTEN -P >/dev/null 2>&1; then
+  echo "✅ Gateway already running on port ${OPENCLAW_GATEWAY_PORT}, connecting TUI..."
+  GATEWAY_PID=""
+else
+  openclaw gateway run &
+  GATEWAY_PID=$!
+  sleep 4
+fi
+
+openclaw tui
+
+# Only kill gateway if we started it
+if [[ -n "$GATEWAY_PID" ]]; then
+  kill $GATEWAY_PID 2>/dev/null
+fi
 ```
 
 Make them executable:
 ```bash
 chmod +x OpenClaw_*.command
 ```
+
+> **Key feature:** The "smart gateway detection" pattern means:
+> - **First launch** → starts gateway + opens TUI
+> - **Subsequent launches** → skips gateway startup, just opens a new TUI window
+> - **TUI exit** → only kills gateway if this script started it (won't kill a separately managed gateway)
 
 ### Step 4: Initialize Workspace Files
 
@@ -222,17 +276,24 @@ done
 
 ### Step 5: Launch All Instances
 
-Double-click each `.command` file, or run in separate terminal tabs:
+Double-click each `.command` file on your Desktop, or run in separate terminal tabs:
 
 ```bash
-# Terminal 1
-OPENCLAW_HOME=~/.openclaw openclaw gateway
+# Terminal 1 — Claude
+./OpenClaw_Claude.command
 
-# Terminal 2
-OPENCLAW_HOME=~/.openclaw-deepseek openclaw gateway
+# Terminal 2 — DeepSeek
+./OpenClaw_Deepseek.command
 
-# Terminal 3
-OPENCLAW_HOME=~/.openclaw-gemini openclaw gateway
+# Terminal 3 — Gemini
+./OpenClaw_Gemini.command
+```
+
+**Reconnecting:** If the gateway is already running (e.g., started via `openclaw gateway start` or a previous script run), simply double-click the `.command` file again — it will detect the running gateway and open a TUI window without restarting anything.
+
+**TUI-only mode:** If you only want a TUI window without managing the gateway:
+```bash
+OPENCLAW_HOME=~/.openclaw-deepseek openclaw tui
 ```
 
 ---
@@ -545,7 +606,107 @@ modelParams:
 
 ---
 
+## Auto Cleanup (Preventing Context Overflow)
+
+Long-running OpenClaw instances accumulate data silently — session history, daily logs, and MEMORY.md grow without limit. Eventually the prompt exceeds the model's context window, causing `Context overflow: prompt too large for the model`. The bot becomes completely unresponsive and cannot even process a `/reset` command.
+
+This is especially dangerous with:
+- Small context models (e.g., DeepSeek R)
+- Active group chats (session files can reach 4-5MB)
+- Agents that write verbose daily logs (200KB+ per day)
+
+### The Problem
+
+| File | Location | Risk |
+|------|----------|------|
+| Session history | `agents/main/sessions/*.jsonl` | Grows to MB, directly causes context overflow |
+| Daily logs | `workspace/memory/YYYY-MM-DD.md` | Agent reads on startup, fills context |
+| MEMORY.md | `workspace/MEMORY.md` | Injected into every prompt as workspace context |
+
+### Solution: Automated Cleanup
+
+Two components work together:
+
+1. **Shell script** (`cleanup.sh`) — mechanically truncates oversized session and daily log files
+2. **AI cron job** — intelligently compresses MEMORY.md, preserving core info and removing redundancy
+
+### Setup
+
+**1. Install the cleanup script:**
+
+```bash
+# Copy to any instance's workspace
+cp cleanup.sh ~/.openclaw/workspace/scripts/cleanup.sh
+chmod +x ~/.openclaw/workspace/scripts/cleanup.sh
+```
+
+**2. Edit the `BOTS` array** at the top of `cleanup.sh`:
+
+```bash
+BOTS=(
+  "$HOME/.openclaw"
+  "$HOME/.openclaw-deepseek"
+  "$HOME/.openclaw-gemini"
+)
+```
+
+**3. Create cron jobs** (in any one instance):
+
+Daily log + session cleanup (4:00 AM):
+```
+Schedule: 0 4 * * *
+Session Target: isolated
+Payload: agentTurn
+Message: "Run: bash /path/to/cleanup.sh"
+Delivery: none
+```
+
+MEMORY.md smart compression (4:30 AM):
+```
+Schedule: 30 4 * * *
+Session Target: isolated
+Payload: agentTurn
+Message: "Check each MEMORY.md file:
+  1. ~/.openclaw/workspace/MEMORY.md
+  2. ~/.openclaw-deepseek/workspace/MEMORY.md
+  3. ~/.openclaw-gemini/workspace/MEMORY.md
+  If any exceeds 10KB, read it, keep core info (identity, rules, config, lessons),
+  remove verbose logs and duplicates, compress to under 8KB."
+Delivery: announce
+```
+
+### Thresholds (configurable in cleanup.sh)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAX_DAILY_BYTES` | 50KB | Daily log truncation threshold |
+| `KEEP_LINES` | 300 | Lines to keep after truncation |
+| `MAX_SESSION_BYTES` | 500KB | Session file truncation threshold |
+| `BAK_EXPIRE_DAYS` | 7 | Backup retention period |
+
+### What It Does
+
+- **Daily logs** > 50KB → archived to `.archive`, original trimmed to last 300 lines
+- **Sessions** > 500KB → backed up to `.bak`, original reset to metadata only
+- **Old logs** > 3 days and > 20KB → trimmed to last 200 lines
+- **Backups** older than 7 days → auto-deleted
+
+For the standalone version with full documentation, see: [openclaw-auto-cleanup](https://github.com/CryptoMiaobug/openclaw-auto-cleanup)
+
+---
+
 ## Troubleshooting
+
+### "Port Already in Use" / "Gateway Already Running"
+
+**Symptom**: Script fails with `gateway already running (pid XXXX); lock timeout`.
+
+**Cause**: A gateway process is already listening on that port.
+
+**Fix**: The updated `.command` scripts handle this automatically with smart gateway detection. If you're using an old script, either:
+1. Update to the smart detection pattern (see Step 3)
+2. Or manually connect TUI only: `OPENCLAW_HOME=~/.openclaw-<name> openclaw tui`
+3. Or kill the existing process: `kill <PID>` then relaunch
 
 ### Instance Won't Start
 

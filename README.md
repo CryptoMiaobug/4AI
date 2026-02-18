@@ -11,6 +11,7 @@
 - **智能协作**：通过共享文件夹实现实例间的通信和协作
 - **技能自动同步**：使用符号链接确保所有实例共享相同的技能目录
 - **智能网关检测**：启动脚本自动检测网关状态，避免端口冲突
+- **自动清理**：防止 context overflow，定时清理膨胀的 session 和日记文件
 
 ## 快速开始
 
@@ -106,6 +107,16 @@ echo "任务完成于 $(date)" > ~/shared/status/d-last-update.txt
 # 机器人C在下次检查时读取
 cat ~/shared/status/d-last-update.txt
 ```
+
+## 自动清理（防止 Context Overflow）
+
+长期运行的 OpenClaw 实例会静默积累数据——session 历史、日记文件、MEMORY.md 无限增长，最终导致 `Context overflow: prompt too large for the model`，bot 彻底瘫痪。
+
+本项目包含自动清理方案：
+- `cleanup.sh` — 定时截断日记和 session 文件
+- AI cron job — 智能精简 MEMORY.md
+
+详细配置见主文档的 "Auto Cleanup" 章节，或独立项目：[openclaw-auto-cleanup](https://github.com/CryptoMiaobug/openclaw-auto-cleanup)
 
 ## 最佳实践
 
